@@ -155,5 +155,172 @@ for (const plan of r2.alternatives) {
   );
 }
 
+// 10) 定量补偿模式
+const compWeights = new Array(12).fill(0);
+compWeights[0] = 10;
+compWeights[1] = 10.2;
+const rc = analyze({
+  holeCount: 12,
+  weights: compWeights,
+  locked: new Array(12).fill(false),
+  threshold: 1,
+  mode: 'compensate',
+  step: 0.2,
+  maxPerSlot: 40,
+});
+check('补偿模式 over', rc.status === 'over');
+check(
+  '槽6加10、槽7加10.2 精确抵消',
+  rc.compRecommendation &&
+    rc.compRecommendation.projectedMagnitude === 0 &&
+    JSON.stringify(rc.compRecommendation.additions) ===
+      JSON.stringify([
+        { slot: 6, amount: 10 },
+        { slot: 7, amount: 10.2 },
+      ]),
+  JSON.stringify(rc.compRecommendation),
+);
+check('最小可达合力为 0', rc.minimumMagnitude === 0);
+check('阈值可达标记', rc.thresholdReachable === true);
+check('补偿备选至多 6 个', rc.compAlternatives.length <= 6);
+check(
+  '补偿使用槽数与加质量字段',
+  rc.compRecommendation.usedSlots === 2 &&
+    rc.compRecommendation.totalAdded === 20.2,
+);
+check(
+  'finalWeights 为原重量叠加补偿量',
+  rc.compRecommendation.finalWeights[6] === 10 &&
+    rc.compRecommendation.finalWeights[7] === 10.2 &&
+    rc.compRecommendation.finalWeights[0] === 10 &&
+    rc.compRecommendation.finalWeights[1] === 10.2,
+);
+check(
+  '补偿后合力分量与方向（精确抵消时为 null）',
+  rc.compRecommendation.projectedX === 0 &&
+    rc.compRecommendation.projectedY === 0 &&
+    rc.compRecommendation.projectedDirectionDeg === null,
+);
+
+// 11) 补偿排序键：合力 -> 总加质量 -> 槽数 -> (槽号,加量)
+for (let i = 1; i < rc.compAlternatives.length; i += 1) {
+  const prev = rc.compAlternatives[i - 1];
+  const cur = rc.compAlternatives[i];
+  const ordered =
+    cur.projectedMagnitude > prev.projectedMagnitude + 1e-9 ||
+    (Math.abs(cur.projectedMagnitude - prev.projectedMagnitude) <= 1e-9 &&
+      (cur.totalAdded > prev.totalAdded + 1e-9 ||
+        (Math.abs(cur.totalAdded - prev.totalAdded) <= 1e-9 &&
+          JSON.stringify(cur.tuple) >= JSON.stringify(prev.tuple))));
+  check(
+    `补偿备选有序 #${i}`,
+    ordered,
+    `${JSON.stringify(prev.tuple)} vs ${JSON.stringify(cur.tuple)}`,
+  );
+}
+
+// 12) 锁定槽不可加重
+const compLocked = new Array(12).fill(false);
+compLocked[6] = true;
+compLocked[7] = true;
+const rcl = analyze({
+  holeCount: 12,
+  weights: compWeights,
+  locked: compLocked,
+  threshold: 1,
+  mode: 'compensate',
+  step: 0.5,
+  maxPerSlot: 40,
+});
+const compTouchesLocked = rcl.compAlternatives.some((p) =>
+  p.additions.some((a) => compLocked[a.slot]),
+);
+check('补偿候选不触碰锁定槽', !compTouchesLocked);
+
+// 13) 无法达到阈值时明确给出最小可达合力
+const rcu = analyze({
+  holeCount: 12,
+  weights: compWeights,
+  locked: new Array(12).fill(false),
+  threshold: 1,
+  mode: 'compensate',
+  step: 1,
+  maxPerSlot: 5,
+});
+check('无法达阈值时 thresholdReachable=false', rcu.thresholdReachable === false);
+check('最小可达合力大于阈值', rcu.minimumMagnitude > 1);
+check('仍给出最优可行加重方案', rcu.compRecommendation !== null);
+check(
+  '最优方案严格优于不加重',
+  rcu.compRecommendation.projectedMagnitude < rcu.resultant.magnitude - 1e-9,
+);
+
+// 14) 全部锁定 => 无补偿方案，最小合力即当前合力
+const rca = analyze({
+  holeCount: 8,
+  weights: [10, 10, 0, 0, 0, 0, 0, 0],
+  locked: new Array(8).fill(true),
+  threshold: 1,
+  mode: 'compensate',
+  step: 1,
+  maxPerSlot: 5,
+});
+check('全锁时无补偿推荐', rca.compRecommendation === null);
+check(
+  '全锁时最小合力等于当前合力',
+  Math.abs(rca.minimumMagnitude - rca.resultant.magnitude) < 1e-9,
+);
+check('全锁时不可达阈值', rca.thresholdReachable === false);
+
+// 15) 补偿参数校验
+for (const [label, extra] of [
+  ['非法 mode', { mode: 'rotate', step: 1, maxPerSlot: 5 }],
+  ['缺 step', { mode: 'compensate', maxPerSlot: 5 }],
+  ['step 非正', { mode: 'compensate', step: 0, maxPerSlot: 5 }],
+  ['maxPerSlot 小于 step', { mode: 'compensate', step: 2, maxPerSlot: 1 }],
+  ['非整数倍', { mode: 'compensate', step: 0.3, maxPerSlot: 1 }],
+  ['档数超限', { mode: 'compensate', step: 0.01, maxPerSlot: 30 }],
+]) {
+  let compThrew = false;
+  try {
+    analyze({
+      holeCount: 8,
+      weights: new Array(8).fill(0),
+      locked: new Array(8).fill(false),
+      threshold: 1,
+      ...extra,
+    });
+  } catch {
+    compThrew = true;
+  }
+  check(`补偿参数校验：${label}`, compThrew);
+}
+
+// 16) 默认 mode 为 swap，老请求结构完全兼容
+const rLegacy = analyze({
+  holeCount: 12,
+  weights: compWeights,
+  locked: new Array(12).fill(false),
+  threshold: 1,
+});
+check('默认 mode=swap', rLegacy.mode === 'swap');
+check('老请求仍返回交换推荐', rLegacy.recommendation !== null);
+check('老请求不含补偿字段', rLegacy.compRecommendation === undefined);
+check('交换模式不含补偿字段', rc.recommendation === undefined);
+
+// 17) 24 孔补偿最坏情况性能（K=2000）
+const tc0 = performance.now();
+analyze({
+  holeCount: 24,
+  weights: Array.from({ length: 24 }, (_, i) => i + 1),
+  locked: new Array(24).fill(false),
+  threshold: 0,
+  mode: 'compensate',
+  step: 0.01,
+  maxPerSlot: 20,
+});
+const compElapsed = performance.now() - tc0;
+check(`24 孔补偿最坏耗时 ${compElapsed.toFixed(0)}ms < 3000ms`, compElapsed < 3000);
+
 console.log(failures === 0 ? '\n全部通过 ✔' : `\n${failures} 项失败 ✘`);
 process.exit(failures === 0 ? 0 : 1);

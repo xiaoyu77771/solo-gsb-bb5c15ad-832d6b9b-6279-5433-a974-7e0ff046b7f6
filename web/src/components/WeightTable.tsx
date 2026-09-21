@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
-import type { SwapPlan } from '../types';
+import type { AnyPlan } from '../types';
+import { planAdditionMap, planSlotSet } from '../lib/plan';
 import { fmt, parseWeight } from '../lib/format';
 
 interface WeightTableProps {
   holeCount: number;
   weights: number[];
   locked: boolean[];
-  activePlan: SwapPlan | null;
+  activePlan: AnyPlan | null;
   resetSignal: number;
   onSetWeight: (index: number, value: number) => void;
   onToggleLock: (index: number) => void;
@@ -39,11 +40,8 @@ export function WeightTable({
     setErrors({});
   }, [resetSignal]);
 
-  const planSlots = new Set<number>();
-  activePlan?.swaps.forEach(([a, b]) => {
-    planSlots.add(a);
-    planSlots.add(b);
-  });
+  const planSlots = planSlotSet(activePlan);
+  const additionMap = planAdditionMap(activePlan);
 
   const commit = (index: number, raw: string) => {
     const value = parseWeight(raw);
@@ -86,7 +84,12 @@ export function WeightTable({
               >
                 {locked[index] ? '🔒' : '🔓'}
               </button>
-              <label className="cell-label">{index + 1}</label>
+              <label className="cell-label">
+                {index + 1}
+                {additionMap.has(index) && (
+                  <em className="cell-add">+{fmt(additionMap.get(index))}</em>
+                )}
+              </label>
               <input
                 inputMode="decimal"
                 className={`weight-input ${errors[index] ? 'input-error' : ''}`}

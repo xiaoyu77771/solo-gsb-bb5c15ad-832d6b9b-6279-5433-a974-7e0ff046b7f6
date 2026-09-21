@@ -358,6 +358,84 @@ select:focus,
 }
 
 /* ---------- 推荐 ---------- */
+.recommend-header {
+  flex-wrap: wrap;
+}
+
+.mode-switch {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mode-tab {
+  border: none;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    color 0.12s;
+}
+
+.mode-tab:hover {
+  color: var(--text);
+}
+
+.mode-tab-active {
+  background: var(--accent);
+  color: #07111f;
+  font-weight: 700;
+}
+
+.comp-params {
+  display: flex;
+  gap: 14px;
+  margin: 8px 0 4px;
+  flex-wrap: wrap;
+}
+
+.enumeration-hint {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.comp-warning {
+  margin: 6px 0 10px;
+  padding: 8px 12px;
+  border: 1px solid rgba(240, 180, 41, 0.5);
+  background: rgba(240, 180, 41, 0.1);
+  border-radius: 8px;
+  color: var(--yellow);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.comp-warning strong {
+  font-size: 14px;
+}
+
+.plan-comp-meta {
+  margin-left: 4px;
+}
+
+.comp-badge {
+  fill: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.cell-add {
+  margin-left: 6px;
+  color: var(--accent);
+  font-style: normal;
+  font-weight: 700;
+}
+
 .plan-list {
   list-style: none;
   margin: 0 0 12px;

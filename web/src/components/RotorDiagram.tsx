@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { BalanceResponse, SwapPlan } from '../types';
+import type { AnyPlan, BalanceResponse } from '../types';
+import { planAdditionMap, planSlotSet } from '../lib/plan';
 import { fmt } from '../lib/format';
 
 const SIZE = 460;
@@ -15,7 +16,7 @@ interface RotorDiagramProps {
   onSwap: (from: number, to: number) => void;
   onToggleLock: (index: number) => void;
   onLockedDrag: () => void;
-  activePlan: SwapPlan | null;
+  activePlan: AnyPlan | null;
 }
 
 /** 0 基槽号 -> SVG 坐标（0 号在正上方，顺时针） */
@@ -55,16 +56,12 @@ export function RotorDiagram({
   );
 
   // 推荐方案涉及的槽位高亮
-  const planSlots = useMemo(() => {
-    const set = new Set<number>();
-    if (activePlan) {
-      activePlan.swaps.forEach(([a, b]) => {
-        set.add(a);
-        set.add(b);
-      });
-    }
-    return set;
-  }, [activePlan]);
+  const planSlots = useMemo(() => planSlotSet(activePlan), [activePlan]);
+  const additionMap = useMemo(
+    () => planAdditionMap(activePlan),
+    [activePlan],
+  );
+  const compensation = activePlan?.kind === 'compensate' ? activePlan : null;
 
   const toSvgPoint = (clientX: number, clientY: number) => {
     const svg = svgRef.current;
@@ -257,6 +254,81 @@ export function RotorDiagram({
           </g>
         )}
 
+        {/* 定量补偿预览：加重矢量（蓝）与补偿后合力（绿虚线） */}
+        {compensation &&
+          compensation.additions.map(({ slot, amount }) => {
+            const angle = (slot * TAU) / count;
+            const len = Math.min(RING_R - SLOT_R - 18, amount * arrowScale);
+            return (
+              <g key={`comp-${slot}`}>
+                <line
+                  x1={CENTER}
+                  y1={CENTER}
+                  x2={CENTER + len * Math.sin(angle)}
+                  y2={CENTER - len * Math.cos(angle)}
+                  stroke="#4da3ff"
+                  strokeWidth={3}
+                  strokeLinecap="round"
+                  opacity={0.9}
+                />
+              </g>
+            );
+          })}
+        {compensation && compensation.projectedMagnitude > 0 && (
+          (() => {
+            const pAngle =
+              compensation.projectedDirectionDeg !== null
+                ? (compensation.projectedDirectionDeg * Math.PI) / 180
+                : 0;
+            const pLen = Math.min(
+              150,
+              Math.max(
+                10,
+                compensation.projectedMagnitude * arrowScale,
+              ),
+            );
+            const pTip = {
+              x: CENTER + pLen * Math.sin(pAngle),
+              y: CENTER - pLen * Math.cos(pAngle),
+            };
+            return (
+              <g>
+                <line
+                  x1={CENTER}
+                  y1={CENTER}
+                  x2={pTip.x}
+                  y2={pTip.y}
+                  stroke="#3ddc97"
+                  strokeWidth={3}
+                  strokeDasharray="7 5"
+                  strokeLinecap="round"
+                />
+                <text
+                  x={pTip.x}
+                  y={pTip.y}
+                  className="arrow-label"
+                  fill="#3ddc97"
+                  textAnchor={pTip.x > CENTER + 8 ? 'start' : pTip.x < CENTER - 8 ? 'end' : 'middle'}
+                  dy={pTip.y < CENTER ? -8 : 16}
+                >
+                  补偿后 {fmt(compensation.projectedMagnitude)} g
+                </text>
+              </g>
+            );
+          })()
+        )}
+        {compensation && compensation.projectedMagnitude === 0 && (
+          <text
+            x={CENTER}
+            y={CENTER + 34}
+            textAnchor="middle"
+            className="hub-sub"
+            fill="#3ddc97"
+          >
+            补偿后完全抵消
+          </text>
+        )}
+
         {/* 中心状态 */}
         <text x={CENTER} y={CENTER - 4} textAnchor="middle" className="hub-text">
           {statusText}
@@ -292,6 +364,11 @@ export function RotorDiagram({
                 {isLocked ? '🔒 ' : ''}
                 {index + 1}
               </text>
+              {additionMap.has(index) && (
+                <text y={-SLOT_R - 6} textAnchor="middle" className="comp-badge">
+                  +{fmt(additionMap.get(index))}
+                </text>
+              )}
             </g>
           );
         })}

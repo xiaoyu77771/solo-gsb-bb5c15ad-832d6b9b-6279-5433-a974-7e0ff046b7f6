@@ -1,8 +1,11 @@
 # 离心机转子配平工作台（Centrifuge Rotor Balancing Workbench）
 
-一个用于离心机转子试管配平的 Web 工作台：选择 **8 / 12 / 24 孔** 等角环形转子，录入各槽试管重量、拖拽换位、锁定槽位；界面实时矢量合成显示失衡合力，超阈值时自动枚举**至多两次交换**并推荐最优方案，一键应用并重算。方案可保存在浏览器本地并随时载入。
+一个用于离心机转子试管配平的 Web 工作台：选择 **8 / 12 / 24 孔** 等角环形转子，录入各槽试管重量、拖拽换位、锁定槽位；界面实时矢量合成显示失衡合力。提供两种配平模式：
 
-技术栈：**React 18 + TypeScript + Vite** 前端，**Node.js + Express** 后端（配平计算 API + 静态托管），Docker 多阶段构建。
+- **交换配平**：超阈值时自动枚举**至多两次交换**并推荐最优方案；
+- **定量补偿**：样本位置不能交换时，设置补偿步长与每槽最大可加质量，在未锁定槽中搜索**至多两个加重位置**及其离散加重质量，使补偿后合力最小。
+
+一键应用并重算，方案可保存在浏览器本地并随时载入。技术栈：**React 18 + TypeScript + Vite** 前端，**Node.js + Express** 后端（配平计算 API + 静态托管），Docker 多阶段构建。
 
 ---
 
@@ -60,9 +63,34 @@ docker compose up --build
 
 展示最佳方案及至多 5 个备选（悬停可预览涉及槽位），并给出枚举方案数与失衡降低量。点击 **「一键应用推荐并重算」** 后重量立即落位并重新发起计算。
 
+### 定量补偿（至多两个加重槽）
+
+适用于样本位置不能交换的场景。在右侧面板切到「定量补偿」页签，设置：
+
+- **补偿步长 step（g）**：可加质量的离散粒度（如 0.5 g）；
+- **每槽最大可加 maxPerSlot（g）**：必须是步长的整数倍，决定每槽离散档数 K（上限 2000 档）。
+
+仅在合力超过阈值时触发，后端在**未锁定**槽位中枚举：
+
+1. 单个加重槽，加重 `k*step`（1 ≤ k ≤ K）；
+2. 两个加重槽（无序对），各自 `k1*step` / `k2*step`。
+
+合力关于档数为凸二次函数：单槽沿合力反方向求连续最优 `k* = -(r·v)/(v·v)`；双槽固定 `k1` 后对 `k2` 同样闭式求解，再取连续最优附近的离散整数窗口，并以「连续域盒约束最小值」逐对剪枝、Top-6 流式合并，保证全局前 6 个候选不遗漏（已对 200+ 随机用例做全暴力枚举对照）。
+
+排序键依次为：
+
+1. 补偿后合力大小（升序，1e-6 比较）；
+2. 总加质量（同合力时用配重少者优先，1e-9 比较）；
+3. 使用槽数（1 槽优先于 2 槽）；
+4. 槽号、加量序列字典序（`[槽号, 加量, …]`）。
+
+界面展示最佳方案及至多 5 个备选；悬停候选时转盘叠加显示**蓝色加重矢量**与**绿色虚线补偿后合力矢量**，加重槽旁标注 `+加量`。点击 **「一键叠加补偿并重算」** 后，补偿量直接叠加到对应槽位的重量上（原样本重量不变、位置不交换）并重新计算。
+
+**锁定槽不可加重。** 当所有加重组合都无法把合力降到阈值内时，面板顶部黄色警示条会明确显示当前步长/每槽上限下的**最小可达合力**（`minimumMagnitude`，`thresholdReachable=false`），仍列出最接近阈值的 6 个方案；若全部槽位锁定或任何加重都只会增大失衡，则无推荐。
+
 ### 方案保存 / 载入
 
-- 「保存当前方案」把转子规格、重量、锁定状态、阈值存入浏览器 **localStorage**（可命名）；
+- 「保存当前方案」把转子规格、重量、锁定状态、阈值与当前模式（含步长/每槽上限）存入浏览器 **localStorage**（可命名）；
 - 当前编辑内容也会自动暂存，刷新页面后恢复；
 - 已保存方案支持一键**载入**或**删除**。数据不经过任何外部服务。
 
@@ -81,15 +109,19 @@ docker compose up --build
   "holeCount": 12,
   "weights": [10, 0, 0, 10.2, 0, 0, 0, 0, 0, 0, 0, 0],
   "locked": [false, false, false, false, false, false, false, false, false, false, false, false],
-  "threshold": 1
+  "threshold": 1,
+  "mode": "swap"
 }
 ```
 
-响应（超阈值时含 `recommendation` / `alternatives` / `enumeration`）：
+`mode` 取 `"swap"`（默认，可省略，老请求完全兼容）或 `"compensate"`（定量补偿，需同时提供 `step` 与 `maxPerSlot`）。
+
+**交换模式**响应（超阈值时含 `recommendation` / `alternatives` / `enumeration`）：
 
 ```json
 {
   "status": "over",
+  "mode": "swap",
   "resultant": {
     "x": 5.1,
     "y": 18.833459,
@@ -111,7 +143,53 @@ docker compose up --build
 
 > 上例中把槽 1 的 10 g（而非 10.2 g）换到对侧槽 8，残差只有 0.2 g，优于直觉方案——这正是枚举推荐的意义。
 
-`status` 取值：`balanced`（合力为 0）、`ok`（阈值内）、`over`（超阈值）。参数非法返回 `400` 与错误信息。
+**定量补偿模式**请求示例：
+
+```json
+{
+  "holeCount": 12,
+  "weights": [10, 10.2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "locked": [false, false, false, false, false, false, false, false, false, false, false, false],
+  "threshold": 1,
+  "mode": "compensate",
+  "step": 0.5,
+  "maxPerSlot": 10
+}
+```
+
+响应（超阈值时含 `compRecommendation` / `compAlternatives` 等）：
+
+```json
+{
+  "status": "over",
+  "mode": "compensate",
+  "resultant": { "magnitude": 19.51177, "...": "..." },
+  "compStep": 0.5,
+  "compMaxPerSlot": 10,
+  "compEnumeration": 2019,
+  "minimumMagnitude": 0.2,
+  "thresholdReachable": true,
+  "compRecommendation": {
+    "additions": [{ "slot": 6, "amount": 10 }, { "slot": 7, "amount": 10 }],
+    "totalAdded": 20,
+    "usedSlots": 2,
+    "projectedMagnitude": 0.2,
+    "projectedX": 0.1,
+    "projectedY": 0.173205,
+    "projectedDirectionDeg": 30,
+    "finalWeights": [10, 10.2, 0, 0, 0, 0, 10, 10, 0, 0, 0, 0],
+    "improvement": 19.31177,
+    "tuple": [2, 6, 10, 7, 10]
+  },
+  "compAlternatives": [ /* 至多 6 个（最佳 + 5 备选），按排序键排列 */ ]
+}
+```
+
+- `minimumMagnitude`：当前步长/每槽上限下离散可达的最小合力（含「不加重」）；
+- `thresholdReachable`：最小可达合力是否在阈值内。为 `false` 时前端明确警示，`compRecommendation` 仍给出严格优于现状的最佳可行方案；无可行加重（全锁定/加重必增大合力）时为 `null`；
+- `additions[].slot` 为 0 基槽号，`amount` 为叠加质量，`finalWeights` 已把补偿量叠加进对应槽位。
+
+`status` 取值：`balanced`（合力为 0）、`ok`（阈值内）、`over`（超阈值）。`mode` 非法、`step`/`maxPerSlot` 非正、`maxPerSlot` 不是 `step` 整数倍或离散档数超过 2000 等情况返回 `400` 与错误信息。
 
 ### `GET /api/health`
 
@@ -151,7 +229,7 @@ npm start              # http://localhost:8080
 ├── package.json            # 根级便捷脚本
 ├── server/                 # Node.js + Express
 │   └── src/
-│       ├── balancing.js    # 矢量合成与至多两次交换枚举（核心算法）
+│       ├── balancing.js    # 矢量合成 + 至多两次交换枚举 / 至多两槽定量补偿枚举（核心算法）
 │       └── server.js       # API + 静态文件托管
 └── web/                    # React + TypeScript + Vite
     └── src/

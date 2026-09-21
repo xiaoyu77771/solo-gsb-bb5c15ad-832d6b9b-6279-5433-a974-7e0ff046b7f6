@@ -2,6 +2,8 @@ export type HoleCount = 8 | 12 | 24;
 
 export type BalanceStatus = 'balanced' | 'ok' | 'over';
 
+export type BalanceMode = 'swap' | 'compensate';
+
 export interface SlotResult {
   index: number;
   weight: number;
@@ -20,6 +22,7 @@ export interface Resultant {
 }
 
 export interface SwapPlan {
+  kind: 'swap';
   /** 交换对（0 基槽号，按执行顺序） */
   swaps: [number, number][];
   projectedMagnitude: number;
@@ -29,15 +32,54 @@ export interface SwapPlan {
   tuple: number[];
 }
 
+export interface CompAddition {
+  /** 0 基槽号 */
+  slot: number;
+  /** 该槽叠加的补偿质量（g，步长整数倍） */
+  amount: number;
+}
+
+export interface CompensationPlan {
+  kind: 'compensate';
+  additions: CompAddition[];
+  /** 总加质量 */
+  totalAdded: number;
+  /** 使用槽数（1 或 2） */
+  usedSlots: number;
+  projectedMagnitude: number;
+  projectedX: number;
+  projectedY: number;
+  /** 补偿后合力方向（自正上方顺时针，度；完全抵消时为 null） */
+  projectedDirectionDeg: number | null;
+  finalWeights: number[];
+  improvement: number;
+  /** 排序键：[使用槽数, 槽号, 加量, ...] */
+  tuple: number[];
+}
+
+export type AnyPlan = SwapPlan | CompensationPlan;
+
 export interface BalanceResponse {
   holeCount: HoleCount;
   threshold: number;
+  mode: BalanceMode;
   status: BalanceStatus;
   slots: SlotResult[];
   resultant: Resultant;
+  // 交换模式
   enumeration?: number;
   recommendation?: SwapPlan | null;
   alternatives?: SwapPlan[];
+  // 定量补偿模式
+  compStep?: number;
+  compMaxPerSlot?: number;
+  compEnumeration?: number;
+  /** 离散档下可达的最小合力 */
+  minimumMagnitude?: number;
+  /** 最小可达合力是否在阈值内 */
+  thresholdReachable?: boolean;
+  compRecommendation?: CompensationPlan | null;
+  compAlternatives?: CompensationPlan[];
 }
 
 export interface BalanceRequest {
@@ -45,6 +87,10 @@ export interface BalanceRequest {
   weights: number[];
   locked: boolean[];
   threshold: number;
+  mode: BalanceMode;
+  // 定量补偿参数
+  step?: number;
+  maxPerSlot?: number;
 }
 
 export interface SavedPlan {
@@ -55,6 +101,10 @@ export interface SavedPlan {
   weights: number[];
   locked: boolean[];
   threshold: number;
+  /** 旧版本保存的方案无此字段，载入时按 swap 处理 */
+  mode?: BalanceMode;
+  step?: number;
+  maxPerSlot?: number;
 }
 
 /** 当前编辑中的工作台状态 */
@@ -63,4 +113,7 @@ export interface WorkbenchDraft {
   weights: number[];
   locked: boolean[];
   threshold: number;
+  mode: BalanceMode;
+  step: number;
+  maxPerSlot: number;
 }

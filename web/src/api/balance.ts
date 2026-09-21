@@ -1,4 +1,38 @@
-import type { BalanceRequest, BalanceResponse } from '../types';
+import type {
+  BalanceRequest,
+  BalanceResponse,
+  CompensationPlan,
+  SwapPlan,
+} from '../types';
+
+/** 后端 DTO 不带 kind，这里按所在字段归一化为可辨识联合类型 */
+function normalize(response: BalanceResponse): BalanceResponse {
+  if (response.mode === 'compensate') {
+    const tag = (plan: CompensationPlan): CompensationPlan => ({
+      ...plan,
+      kind: 'compensate',
+    });
+    return {
+      ...response,
+      compRecommendation:
+        response.compRecommendation === null ||
+        response.compRecommendation === undefined
+          ? null
+          : tag(response.compRecommendation),
+      compAlternatives: (response.compAlternatives ?? []).map(tag),
+    };
+  }
+  const tag = (plan: SwapPlan): SwapPlan => ({ ...plan, kind: 'swap' });
+  return {
+    ...response,
+    recommendation:
+      response.recommendation === null ||
+      response.recommendation === undefined
+        ? null
+        : tag(response.recommendation),
+    alternatives: (response.alternatives ?? []).map(tag),
+  };
+}
 
 export async function fetchBalance(
   request: BalanceRequest,
@@ -18,5 +52,5 @@ export async function fetchBalance(
     }
     throw new Error(message);
   }
-  return (await response.json()) as BalanceResponse;
+  return normalize((await response.json()) as BalanceResponse);
 }
