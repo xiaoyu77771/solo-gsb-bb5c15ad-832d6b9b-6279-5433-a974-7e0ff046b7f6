@@ -1,6 +1,11 @@
 # 离心机转子配平工作台（Centrifuge Rotor Balancing Workbench）
 
-一个用于离心机转子试管配平的 Web 工作台：选择 **8 / 12 / 24 孔** 等角环形转子，录入各槽试管重量、拖拽换位、锁定槽位；界面实时矢量合成显示失衡合力，超阈值时自动枚举**至多两次交换**并推荐最优方案，一键应用并重算。方案可保存在浏览器本地并随时载入。
+一个用于离心机转子试管配平的 Web 工作台：选择 **8 / 12 / 24 孔** 等角环形转子，录入各槽试管重量、拖拽换位、锁定槽位；界面实时矢量合成显示失衡合力。提供两种配平模式：
+
+- **交换换位**：超阈值时自动枚举**至多两次交换**并推荐最优方案，一键应用并重算；
+- **定量补偿**：样本位置不能交换时，设置**补偿步长**与**每槽最大可加质量**，后端在未锁定槽中搜索**至多两个加重位置及其离散配重**，使补偿后合力最小。
+
+方案可保存在浏览器本地并随时载入。
 
 技术栈：**React 18 + TypeScript + Vite** 前端，**Node.js + Express** 后端（配平计算 API + 静态托管），Docker 多阶段构建。
 
@@ -60,6 +65,22 @@ docker compose up --build
 
 展示最佳方案及至多 5 个备选（悬停可预览涉及槽位），并给出枚举方案数与失衡降低量。点击 **「一键应用推荐并重算」** 后重量立即落位并重新发起计算。
 
+### 定量补偿模式（样本位置不能交换）
+
+在右侧推荐面板切换到 **「定量补偿」**，适用于试管不能换位、只能加配重的场景：
+
+- 用户设置两个参数：**补偿步长**（g，每个加重槽的配重量都是步长的整数倍）与**每槽最大可加质量**（g）；
+- 后端只在**未锁定槽位**中搜索，枚举 **1 个或 2 个**加重槽位及其离散质量（锁定槽不可加重）；
+- 排序键依次为：
+  1. 补偿后合力大小（升序，四舍五入到 1e-6 比较）；
+  2. 总加质量（升序）；
+  3. 使用槽数（1 槽优先于 2 槽）；
+  4. 槽号 / 步数序列字典序；
+- 展示最佳方案及至多 5 个备选；悬停候选时转盘上以**蓝色虚线箭头预览补偿后的合力**，绿色细线为新增配重矢量，加重槽显示 **+质量** 徽标；
+- 点击 **「一键应用补偿并重算」** 后把补偿量叠加到对应槽位的重量上并重新计算；
+- **无法达到阈值时**（步长过粗、每槽上限不足或锁定限制），面板明确显示**最小可达合力**；全部锁定时无推荐，最小可达合力即当前合力；
+- 枚举组合数设有上限（500 万），参数过细导致超限会返回 400 并提示增大步长 / 减小上限。
+
 ### 方案保存 / 载入
 
 - 「保存当前方案」把转子规格、重量、锁定状态、阈值存入浏览器 **localStorage**（可命名）；
@@ -74,7 +95,7 @@ docker compose up --build
 
 ### `POST /api/balance`
 
-请求：
+请求（交换模式，`mode` 缺省即 `swap`）：
 
 ```json
 {
@@ -85,11 +106,26 @@ docker compose up --build
 }
 ```
 
-响应（超阈值时含 `recommendation` / `alternatives` / `enumeration`）：
+定量补偿模式请求（额外传 `mode` / `step` / `maxAddPerSlot`）：
+
+```json
+{
+  "holeCount": 12,
+  "weights": [10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "locked": [false, false, false, false, false, false, false, false, false, false, false, false],
+  "threshold": 1,
+  "mode": "compensate",
+  "step": 0.5,
+  "maxAddPerSlot": 10
+}
+```
+
+交换模式响应（超阈值时含 `recommendation` / `alternatives` / `enumeration`）：
 
 ```json
 {
   "status": "over",
+  "mode": "swap",
   "resultant": {
     "x": 5.1,
     "y": 18.833459,
@@ -99,6 +135,7 @@ docker compose up --build
   },
   "enumeration": 442,
   "recommendation": {
+    "kind": "swap",
     "swaps": [[0, 7]],
     "projectedMagnitude": 0.2,
     "finalWeights": [0, 10.2, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0],
@@ -109,9 +146,34 @@ docker compose up --build
 }
 ```
 
-> 上例中把槽 1 的 10 g（而非 10.2 g）换到对侧槽 8，残差只有 0.2 g，优于直觉方案——这正是枚举推荐的意义。
+定量补偿模式响应（`recommendation.kind = "compensate"`）：
 
-`status` 取值：`balanced`（合力为 0）、`ok`（阈值内）、`over`（超阈值）。参数非法返回 `400` 与错误信息。
+```json
+{
+  "status": "over",
+  "mode": "compensate",
+  "enumeration": 26641,
+  "recommendation": {
+    "kind": "compensate",
+    "additions": [{ "slot": 6, "amount": 10 }],
+    "totalAdded": 10,
+    "slotCount": 1,
+    "projectedMagnitude": 0,
+    "projectedResultant": { "x": 0, "y": 0, "magnitude": 0, "directionDeg": null, "nearestSlotIndex": null },
+    "finalWeights": [10, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0],
+    "improvement": 10,
+    "thresholdReachable": true,
+    "tuple": [10, 6, 20]
+  },
+  "alternatives": [ /* 最佳方案及至多 5 个备选 */ ],
+  "thresholdReachable": true,
+  "minimumMagnitude": 0
+}
+```
+
+> 上例（交换模式）中把槽 1 的 10 g（而非 10.2 g）换到对侧槽 8，残差只有 0.2 g，优于直觉方案——这正是枚举推荐的意义。
+
+`status` 取值：`balanced`（合力为 0）、`ok`（阈值内）、`over`（超阈值）。定量补偿模式下若最佳方案仍无法降到阈值，`thresholdReachable` 为 `false`，`minimumMagnitude` 给出最小可达合力。参数非法（含补偿组合数超过 500 万上限）返回 `400` 与错误信息。
 
 ### `GET /api/health`
 
@@ -151,7 +213,7 @@ npm start              # http://localhost:8080
 ├── package.json            # 根级便捷脚本
 ├── server/                 # Node.js + Express
 │   └── src/
-│       ├── balancing.js    # 矢量合成与至多两次交换枚举（核心算法）
+│       ├── balancing.js    # 矢量合成、至多两次交换枚举与至多两槽定量补偿枚举（核心算法）
 │       └── server.js       # API + 静态文件托管
 └── web/                    # React + TypeScript + Vite
     └── src/

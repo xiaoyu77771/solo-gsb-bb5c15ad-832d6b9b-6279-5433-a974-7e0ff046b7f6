@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { BalanceResponse, SwapPlan } from '../types';
+import type { AnyPlan, BalanceResponse, CompensationPlan } from '../types';
+import { planAdditions, planSlots } from '../lib/plan';
 import { fmt } from '../lib/format';
 
 const SIZE = 460;
@@ -15,7 +16,7 @@ interface RotorDiagramProps {
   onSwap: (from: number, to: number) => void;
   onToggleLock: (index: number) => void;
   onLockedDrag: () => void;
-  activePlan: SwapPlan | null;
+  activePlan: AnyPlan | null;
 }
 
 /** 0 基槽号 -> SVG 坐标（0 号在正上方，顺时针） */
@@ -55,16 +56,13 @@ export function RotorDiagram({
   );
 
   // 推荐方案涉及的槽位高亮
-  const planSlots = useMemo(() => {
-    const set = new Set<number>();
-    if (activePlan) {
-      activePlan.swaps.forEach(([a, b]) => {
-        set.add(a);
-        set.add(b);
-      });
-    }
-    return set;
-  }, [activePlan]);
+  const planSlotsSet = useMemo(
+    () => (activePlan ? planSlots(activePlan) : new Set<number>()),
+    [activePlan],
+  );
+  const additions = useMemo(() => planAdditions(activePlan), [activePlan]);
+  const compensationPlan: CompensationPlan | null =
+    activePlan?.kind === 'compensate' ? activePlan : null;
 
   const toSvgPoint = (clientX: number, clientY: number) => {
     const svg = svgRef.current;
@@ -141,6 +139,7 @@ export function RotorDiagram({
 
   const status = result?.status ?? 'balanced';
   const resultant = result?.resultant;
+  const projected = compensationPlan?.projectedResultant ?? null;
   const arrowScale = 120 / maxVectorScale;
   const arrowLen = Math.min(
     150,
@@ -156,6 +155,26 @@ export function RotorDiagram({
   };
   const arrowColor =
     status === 'over' ? '#ff5d73' : status === 'ok' ? '#f0b429' : '#3ddc97';
+
+  // 补偿后合力预览（蓝色），按是否进入阈值着色
+  const projectedLen = projected
+    ? Math.min(150, Math.max(projected.magnitude > 0 ? 14 : 0, projected.magnitude * arrowScale))
+    : 0;
+  const projectedAngle =
+    projected && projected.directionDeg !== null
+      ? (projected.directionDeg * Math.PI) / 180
+      : 0;
+  const projectedColor =
+    projected && projected.magnitude > (result?.threshold ?? 0)
+      ? '#7fb8ff'
+      : '#3ddc97';
+  const projectedTip = projected
+    ? {
+        x: CENTER + projectedLen * Math.sin(projectedAngle),
+        y: CENTER - projectedLen * Math.cos(projectedAngle),
+      }
+    : null;
+
   const thresholdRingR = Math.min(
     RING_R - SLOT_R - 14,
     Math.max(10, (result?.threshold ?? 0) * arrowScale),
@@ -188,6 +207,17 @@ export function RotorDiagram({
             orient="auto-start-reverse"
           >
             <path d="M 0 0 L 10 5 L 0 10 z" fill={arrowColor} />
+          </marker>
+          <marker
+            id="arrowhead-projected"
+            viewBox="0 0 10 10"
+            refX="8"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse"
+          >
+            <path d="M 0 0 L 10 5 L 0 10 z" fill={projectedColor} />
           </marker>
         </defs>
 
@@ -231,9 +261,9 @@ export function RotorDiagram({
           );
         })}
 
-        {/* 合力箭头 */}
+        {/* 合力箭头（预览补偿方案时以虚影显示当前合力） */}
         {resultant && resultant.magnitude > 0 && (
-          <g>
+          <g className={projected ? 'resultant-current' : undefined}>
             <line
               x1={CENTER}
               y1={CENTER}
@@ -257,6 +287,56 @@ export function RotorDiagram({
           </g>
         )}
 
+        {/* 补偿预览：各加重槽新增的配重矢量（绿色细线） */}
+        {compensationPlan &&
+          compensationPlan.additions.map(({ slot, amount }) => {
+            const angle = (slot * TAU) / count;
+            const len = Math.min(RING_R - SLOT_R - 18, amount * arrowScale);
+            return (
+              <line
+                key={`add-vec-${slot}`}
+                x1={CENTER}
+                y1={CENTER}
+                x2={CENTER + len * Math.sin(angle)}
+                y2={CENTER - len * Math.cos(angle)}
+                className="add-vector"
+              />
+            );
+          })}
+
+        {/* 补偿后合力箭头（蓝色实线，预览时显示） */}
+        {projected && projectedTip && (
+          <g>
+            <line
+              x1={CENTER}
+              y1={CENTER}
+              x2={projectedTip.x}
+              y2={projectedTip.y}
+              stroke={projectedColor}
+              strokeWidth={4}
+              strokeLinecap="round"
+              strokeDasharray="8 4"
+              markerEnd="url(#arrowhead-projected)"
+            />
+            <text
+              x={projectedTip.x}
+              y={projectedTip.y}
+              className="arrow-label"
+              fill={projectedColor}
+              textAnchor={
+                projectedTip.x > CENTER + 8
+                  ? 'start'
+                  : projectedTip.x < CENTER - 8
+                    ? 'end'
+                    : 'middle'
+              }
+              dy={projectedTip.y < CENTER ? -8 : 16}
+            >
+              补偿后 {fmt(projected.magnitude)} g
+            </text>
+          </g>
+        )}
+
         {/* 中心状态 */}
         <text x={CENTER} y={CENTER - 4} textAnchor="middle" className="hub-text">
           {statusText}
@@ -270,7 +350,8 @@ export function RotorDiagram({
           const isLocked = locked[index];
           const isDragging = dragging === index;
           const isHover = hoverSlot === index && dragging !== null;
-          const inPlan = planSlots.has(index);
+          const inPlan = planSlotsSet.has(index);
+          const addAmount = additions.get(index);
           const isNearest = resultant?.nearestSlotIndex === index && status === 'over';
           const weight = weights[index];
           return (
@@ -285,6 +366,14 @@ export function RotorDiagram({
               onPointerDown={(event) => startDrag(event, index)}
             >
               <circle r={SLOT_R} className="slot-circle" />
+              {addAmount !== undefined && (
+                <g className="add-badge">
+                  <circle cy={-SLOT_R + 2} r={9} />
+                  <text y={-SLOT_R + 5} textAnchor="middle">
+                    +{fmt(addAmount)}
+                  </text>
+                </g>
+              )}
               <text y={-4} textAnchor="middle" className="slot-weight">
                 {fmt(weight)}
               </text>

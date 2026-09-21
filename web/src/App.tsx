@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  AnyPlan,
+  BalanceMode,
   BalanceResponse,
   HoleCount,
   SavedPlan,
-  SwapPlan,
   WorkbenchDraft,
 } from './types';
 import { fetchBalance } from './api/balance';
@@ -22,6 +23,10 @@ import { PlanBar } from './components/PlanBar';
 
 const HOLE_OPTIONS: HoleCount[] = [8, 12, 24];
 const DEFAULT_THRESHOLD = 1;
+/** 定量补偿默认步长（g） */
+export const DEFAULT_STEP = 0.5;
+/** 定量补偿默认每槽最大可加质量（g） */
+export const DEFAULT_MAX_ADD = 10;
 
 function emptyState(holeCount: HoleCount): WorkbenchDraft {
   return {
@@ -29,23 +34,43 @@ function emptyState(holeCount: HoleCount): WorkbenchDraft {
     weights: new Array(holeCount).fill(0),
     locked: new Array(holeCount).fill(false),
     threshold: DEFAULT_THRESHOLD,
+    mode: 'swap',
+    step: DEFAULT_STEP,
+    maxAddPerSlot: DEFAULT_MAX_ADD,
   };
 }
 
-function initialState(): WorkbenchDraft {
-  const draft = loadDraft();
+type DraftInput = Partial<Omit<WorkbenchDraft, 'holeCount' | 'weights' | 'locked'>> &
+  Pick<WorkbenchDraft, 'holeCount' | 'weights' | 'locked' | 'threshold'>;
+
+function normalizeDraft(draft: DraftInput | null | undefined): WorkbenchDraft | null {
   if (
-    draft &&
-    HOLE_OPTIONS.includes(draft.holeCount) &&
-    Array.isArray(draft.weights) &&
-    draft.weights.length === draft.holeCount &&
-    Array.isArray(draft.locked) &&
-    draft.locked.length === draft.holeCount &&
-    typeof draft.threshold === 'number'
+    !draft ||
+    !HOLE_OPTIONS.includes(draft.holeCount) ||
+    !Array.isArray(draft.weights) ||
+    draft.weights.length !== draft.holeCount ||
+    !Array.isArray(draft.locked) ||
+    draft.locked.length !== draft.holeCount ||
+    typeof draft.threshold !== 'number'
   ) {
-    return draft;
+    return null;
   }
-  return emptyState(12);
+  const mode: BalanceMode = draft.mode === 'compensate' ? 'compensate' : 'swap';
+  const step =
+    typeof draft.step === 'number' && Number.isFinite(draft.step) && draft.step > 0
+      ? draft.step
+      : DEFAULT_STEP;
+  const maxAddPerSlot =
+    typeof draft.maxAddPerSlot === 'number' &&
+    Number.isFinite(draft.maxAddPerSlot) &&
+    draft.maxAddPerSlot > 0
+      ? draft.maxAddPerSlot
+      : DEFAULT_MAX_ADD;
+  return { ...draft, mode, step, maxAddPerSlot };
+}
+
+function initialState(): WorkbenchDraft {
+  return normalizeDraft(loadDraft()) ?? emptyState(12);
 }
 
 export default function App() {
@@ -54,18 +79,27 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [plans, setPlans] = useState<SavedPlan[]>(() => loadPlans());
-  const [activePlan, setActivePlan] = useState<SwapPlan | null>(null);
+  const [activePlan, setActivePlan] = useState<AnyPlan | null>(null);
   const [resetSignal, setResetSignal] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
 
-  const { holeCount, weights, locked, threshold } = draft;
+  const { holeCount, weights, locked, threshold, mode, step, maxAddPerSlot } =
+    draft;
 
   const showToast = useCallback((message: string) => {
     setToast(message);
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(null), 2200);
   }, []);
+
+  // 定量补偿参数是否可用于请求（非法时由界面提示，不发送请求）
+  const compConfigValid =
+    Number.isFinite(step) &&
+    step > 0 &&
+    Number.isFinite(maxAddPerSlot) &&
+    maxAddPerSlot > 0 &&
+    maxAddPerSlot >= step;
 
   // 输入变化后本地暂存（防抖）
   useEffect(() => {
@@ -76,6 +110,14 @@ export default function App() {
   // 实时请求后端计算（防抖）
   useEffect(() => {
     let cancelled = false;
+    if (mode === 'compensate' && !compConfigValid) {
+      setLoading(false);
+      setResult(null);
+      setError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
     const timer = window.setTimeout(async () => {
       setLoading(true);
       setError(null);
@@ -85,6 +127,8 @@ export default function App() {
           weights,
           locked,
           threshold,
+          mode,
+          ...(mode === 'compensate' ? { step, maxAddPerSlot } : {}),
         });
         if (!cancelled) setResult(response);
       } catch (requestError) {
@@ -101,16 +145,13 @@ export default function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [holeCount, weights, locked, threshold]);
+  }, [holeCount, weights, locked, threshold, mode, step, maxAddPerSlot, compConfigValid]);
 
-  const rebuild = useCallback(
-    (nextHoleCount: HoleCount) => {
-      setDraft(emptyState(nextHoleCount));
-      setActivePlan(null);
-      setResetSignal((n) => n + 1);
-    },
-    [],
-  );
+  const rebuild = useCallback((nextHoleCount: HoleCount) => {
+    setDraft(emptyState(nextHoleCount));
+    setActivePlan(null);
+    setResetSignal((n) => n + 1);
+  }, []);
 
   const setWeight = useCallback((index: number, value: number) => {
     setDraft((prev) => {
@@ -160,12 +201,35 @@ export default function App() {
     setDraft((prev) => ({ ...prev, weights: [...plan.finalWeights] }));
     setActivePlan(null);
     setResetSignal((n) => n + 1);
-    showToast(
-      `已应用推荐：${plan.swaps
-        .map(([a, b]) => `${a + 1}⇄${b + 1}`)
-        .join('，')}，已重新计算`,
-    );
+    if (plan.kind === 'swap') {
+      showToast(
+        `已应用交换推荐：${plan.swaps
+          .map(([a, b]) => `${a + 1}⇄${b + 1}`)
+          .join('，')}，已重新计算`,
+      );
+    } else {
+      showToast(
+        `已应用定量补偿：${plan.additions
+          .map((a) => `槽 ${a.slot + 1} +${a.amount}g`)
+          .join('，')}，已重新计算`,
+      );
+    }
   }, [result, showToast]);
+
+  const setMode = useCallback((nextMode: BalanceMode) => {
+    setDraft((prev) => ({ ...prev, mode: nextMode }));
+    setActivePlan(null);
+  }, []);
+
+  const setStep = useCallback((value: number) => {
+    setDraft((prev) => ({ ...prev, step: value }));
+    setActivePlan(null);
+  }, []);
+
+  const setMaxAdd = useCallback((value: number) => {
+    setDraft((prev) => ({ ...prev, maxAddPerSlot: value }));
+    setActivePlan(null);
+  }, []);
 
   const handleSave = useCallback(
     (name: string) => {
@@ -177,21 +241,40 @@ export default function App() {
         weights,
         locked,
         threshold,
+        mode,
+        step,
+        maxAddPerSlot,
       };
       setPlans(savePlan(plan));
       showToast(`方案「${name}」已保存到浏览器`);
     },
-    [holeCount, weights, locked, threshold, showToast],
+    [holeCount, weights, locked, threshold, mode, step, maxAddPerSlot, showToast],
   );
 
   const handleLoad = useCallback(
     (plan: SavedPlan) => {
-      setDraft({
+      const normalized = normalizeDraft({
         holeCount: plan.holeCount,
         weights: [...plan.weights],
         locked: [...plan.locked],
         threshold: plan.threshold,
+        mode: plan.mode,
+        step: plan.step,
+        maxAddPerSlot: plan.maxAddPerSlot,
       });
+      if (!normalized) {
+        setDraft(emptyState(plan.holeCount));
+      } else {
+        setDraft({
+          holeCount: normalized.holeCount,
+          weights: normalized.weights,
+          locked: normalized.locked,
+          threshold: normalized.threshold,
+          mode: normalized.mode,
+          step: normalized.step,
+          maxAddPerSlot: normalized.maxAddPerSlot,
+        });
+      }
       setActivePlan(null);
       setResetSignal((n) => n + 1);
       showToast(`已载入方案「${plan.name}」`);
@@ -216,7 +299,7 @@ export default function App() {
           <span className="logo">⚖️</span>
           <div>
             <h1>离心机转子配平工作台</h1>
-            <p>等角环形槽位 · 矢量实时合成 · 至多两次交换枚举推荐</p>
+            <p>等角环形槽位 · 矢量实时合成 · 交换换位 / 定量补偿双模式</p>
           </div>
         </div>
         <div className="topbar-controls">
@@ -266,7 +349,9 @@ export default function App() {
           />
           <p className="hint rotor-hint">
             操作：按住未锁定槽位拖到另一槽位完成换位；单击槽位切换锁定；
-            红色箭头为失衡合力方向，虚线圆为阈值边界。
+            {mode === 'compensate'
+              ? '定量补偿模式只加配重、不换位；蓝色箭头为补偿后合力预览，绿色徽标为各槽加质量。'
+              : '红色箭头为失衡合力方向，虚线圆为阈值边界。'}
           </p>
         </div>
 
@@ -275,8 +360,15 @@ export default function App() {
           <RecommendPanel
             result={result}
             activePlan={activePlan}
+            mode={mode}
+            step={step}
+            maxAddPerSlot={maxAddPerSlot}
+            compConfigValid={compConfigValid}
             onApply={applyRecommendation}
             onPreview={setActivePlan}
+            onModeChange={setMode}
+            onStepChange={setStep}
+            onMaxAddChange={setMaxAdd}
           />
         </div>
       </main>

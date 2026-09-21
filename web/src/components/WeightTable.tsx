@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
-import type { SwapPlan } from '../types';
+import type { AnyPlan } from '../types';
+import { planAdditions, planSlots } from '../lib/plan';
 import { fmt, parseWeight } from '../lib/format';
 
 interface WeightTableProps {
   holeCount: number;
   weights: number[];
   locked: boolean[];
-  activePlan: SwapPlan | null;
+  activePlan: AnyPlan | null;
   resetSignal: number;
   onSetWeight: (index: number, value: number) => void;
   onToggleLock: (index: number) => void;
@@ -39,11 +40,8 @@ export function WeightTable({
     setErrors({});
   }, [resetSignal]);
 
-  const planSlots = new Set<number>();
-  activePlan?.swaps.forEach(([a, b]) => {
-    planSlots.add(a);
-    planSlots.add(b);
-  });
+  const planSlotsSet = planSlots(activePlan);
+  const additions = planAdditions(activePlan);
 
   const commit = (index: number, raw: string) => {
     const value = parseWeight(raw);
@@ -70,11 +68,12 @@ export function WeightTable({
       >
         {Array.from({ length: holeCount }, (_, index) => {
           const raw = draft[index] ?? String(weights[index] === 0 ? '' : fmt(weights[index]));
+          const addAmount = additions.get(index);
           return (
             <div
               key={index}
               className={`slot-cell ${locked[index] ? 'is-locked' : ''} ${
-                planSlots.has(index) ? 'is-plan' : ''
+                planSlotsSet.has(index) ? 'is-plan' : ''
               }`}
             >
               <button
@@ -86,7 +85,12 @@ export function WeightTable({
               >
                 {locked[index] ? '🔒' : '🔓'}
               </button>
-              <label className="cell-label">{index + 1}</label>
+              <label className="cell-label">
+                {index + 1}
+                {addAmount !== undefined && (
+                  <span className="cell-add">+{fmt(addAmount)}g</span>
+                )}
+              </label>
               <input
                 inputMode="decimal"
                 className={`weight-input ${errors[index] ? 'input-error' : ''}`}
